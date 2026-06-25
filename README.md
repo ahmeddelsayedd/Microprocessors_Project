@@ -22,6 +22,3 @@ A radar-style distance monitoring system built using the AT89S52 microcontroller
 3. Calculate distance
 4. Update LCD
 5. Activate alerts
-## Demo Video
-
-(Add video link)
