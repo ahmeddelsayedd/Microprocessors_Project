@@ -1,0 +1,430 @@
+;==========================================
+; ULTRASONIC DISTANCE METER WITH LCD, BUZZER AND LEDs
+; LEDs connection: Anode to +5V, Cathode to P3.3/P3.4/P3.5
+; LED ON when pin = 0, LED OFF when pin = 1
+; HC-SR04: P1.0 (Trig), P1.1 (Echo)
+; LCD: P2.0-P2.3 (D4-D7), P2.4 (RS), P2.5 (EN)
+; Buzzer: P2.6
+; Distance thresholds: Green >30cm, Yellow 20-30cm, Red 10-20cm, <10cm Red ON + Buzzer
+;==========================================
+
+ORG 0000H
+    LJMP MAIN
+
+ORG 000BH
+    LJMP TIMER0_ISR
+
+ORG 0100H
+MAIN:
+    MOV SP, #70H
+    
+    ; Setup Timer 0
+    MOV TMOD, #01H
+    CLR TF0
+    SETB ET0
+    SETB EA
+    
+    ; Initialize LCD
+    LCALL LCD_INIT
+    
+    ; Clear display
+    MOV A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_50MS
+    
+    ; Display header
+    MOV DPTR, #MSG_HEADER
+    LCALL LCD_STRING
+    
+    ; Initialize outputs
+    SETB P2.6          ; Buzzer OFF (HIGH = OFF)
+    
+    ; For common anode LEDs: SETB = OFF, CLR = ON
+    SETB P3.3          ; Green LED OFF
+    SETB P3.4          ; Yellow LED OFF
+    SETB P3.5          ; Red LED OFF
+    
+    ; Initialize last distance
+    MOV 30H, #255
+    
+    MAIN_LOOP:
+        LCALL MEASURE_DISTANCE
+        LCALL UPDATE_DISPLAY
+        LCALL CONTROL_LEDS
+        LCALL CONTROL_BUZZER
+        LCALL DELAY_200MS
+        SJMP MAIN_LOOP
+
+;==========================================
+; CONTROL LEDs BASED ON DISTANCE
+; For common anode (LED+ to 5V, LED- to pin)
+; CLR = ON, SETB = OFF
+; Green: >30cm
+; Yellow: 20-30cm
+; Red: 10-20cm OR <10cm (with buzzer)
+;==========================================
+CONTROL_LEDS:
+    MOV A, R2
+    
+    ; Check for <10cm first (Red LED ON)
+    CJNE A, #10, CHECK_LESS_10
+CHECK_LESS_10:
+    JNC CHECK_GREEN     ; If >=10, check green
+    ; Distance <10cm
+    SETB P3.3           ; Green OFF
+    SETB P3.4           ; Yellow OFF
+    CLR P3.5            ; Red ON
+    RET
+    
+CHECK_GREEN:
+    ; Check for >30cm (Green LED)
+    CJNE A, #31, CHECK_GREEN_RANGE
+CHECK_GREEN_RANGE:
+    JC CHECK_YELLOW     ; If <31, check yellow
+    ; Distance >= 31cm
+    CLR P3.3            ; Green ON
+    SETB P3.4           ; Yellow OFF
+    SETB P3.5           ; Red OFF
+    RET
+    
+CHECK_YELLOW:
+    ; Check for 20-30cm
+    CJNE A, #20, CHECK_YELLOW_RANGE
+CHECK_YELLOW_RANGE:
+    JC CHECK_RED        ; If <20, check red
+    ; Distance 20-30cm
+    SETB P3.3           ; Green OFF
+    CLR P3.4            ; Yellow ON
+    SETB P3.5           ; Red OFF
+    RET
+    
+CHECK_RED:
+    ; Distance 10-20cm
+    SETB P3.3           ; Green OFF
+    SETB P3.4           ; Yellow OFF
+    CLR P3.5            ; Red ON
+    RET
+
+;==========================================
+; UPDATE DISPLAY - ONLY REWRITES WHEN CHANGED
+;==========================================
+UPDATE_DISPLAY:
+    MOV A, R2
+    CJNE A, 30H, UPDATE
+    RET                 ; No change, skip update
+    
+UPDATE:
+    MOV 30H, A          ; Store new distance
+    
+    ; Move to second line
+    MOV A, #0C0H
+    LCALL LCD_CMD
+    LCALL DELAY_1MS
+    
+    ; Display "Dist: "
+    MOV DPTR, #MSG_DIST
+    LCALL LCD_STRING
+    LCALL DELAY_1MS
+    
+    ; Convert and display number
+    MOV A, R2
+    LCALL DISPLAY_NUMBER
+    
+    ; Display "cm"
+    MOV DPTR, #MSG_CM
+    LCALL LCD_STRING
+    LCALL DELAY_1MS
+    
+    ; Warning message
+    MOV A, R2
+    CJNE A, #10, WARN_CHECK
+WARN_CHECK:
+    JNC NO_WARN
+    MOV DPTR, #MSG_WARNING
+    SJMP SHOW_WARN
+NO_WARN:
+    MOV DPTR, #MSG_BLANK
+SHOW_WARN:
+    LCALL LCD_STRING
+    
+    RET
+
+;==========================================
+; DISPLAY 3-DIGIT NUMBER
+;==========================================
+DISPLAY_NUMBER:
+    CJNE A, #200, RANGE
+RANGE:
+    JC NUM_OK
+    MOV A, #199
+NUM_OK:
+    MOV B, #100
+    DIV AB
+    JZ SKIP_H
+    ADD A, #30H
+    LCALL LCD_DATA
+    LCALL DELAY_1MS
+SKIP_H:
+    MOV A, B
+    MOV B, #10
+    DIV AB
+    ADD A, #30H
+    LCALL LCD_DATA
+    LCALL DELAY_1MS
+    MOV A, B
+    ADD A, #30H
+    LCALL LCD_DATA
+    LCALL DELAY_1MS
+    RET
+
+;==========================================
+; MEASURE DISTANCE
+;==========================================
+MEASURE_DISTANCE:
+    ; Trigger pulse
+    SETB P1.0
+    LCALL DELAY_10US
+    CLR P1.0
+    
+    ; Wait for echo
+    JNB P1.1, $
+    
+    ; Start timer
+    CLR TR0
+    MOV TL0, #00H
+    MOV TH0, #00H
+    CLR TF0
+    SETB TR0
+    
+    ; Wait for echo end
+    JB P1.1, $
+    CLR TR0
+    
+    ; Calculate distance
+    MOV R7, TH0
+    MOV R6, TL0
+    LCALL DIV_58
+    MOV R2, A
+    RET
+
+;==========================================
+; DIVIDE BY 58
+;==========================================
+DIV_58:
+    MOV R5, #0
+DIV_LP:
+    CLR C
+    MOV A, R6
+    SUBB A, #58
+    MOV R6, A
+    MOV A, R7
+    SUBB A, #0
+    MOV R7, A
+    JC DIV_END
+    INC R5
+    SJMP DIV_LP
+DIV_END:
+    MOV A, R5
+    RET
+
+;==========================================
+; CONTROL BUZZER (activates when distance <10cm)
+;==========================================
+CONTROL_BUZZER:
+    MOV A, R2
+    CJNE A, #10, BZ_CHECK
+BZ_CHECK:
+    JC BZ_ON
+    SETB P2.6          ; Buzzer OFF (HIGH = OFF)
+    RET
+BZ_ON:
+    CLR P2.6           ; Buzzer ON (LOW = ON)
+    RET
+
+;==========================================
+; TIMER OVERFLOW
+;==========================================
+TIMER0_ISR:
+    CLR TR0
+    MOV TH0, #00H
+    MOV TL0, #00H
+    MOV R2, #255
+    RETI
+
+;==========================================
+; LCD ROUTINES
+;==========================================
+LCD_INIT:
+    LCALL DELAY_100MS
+    LCALL DELAY_100MS
+    
+    ; Reset sequence
+    CLR P2.4
+    MOV P2, #30H
+    SETB P2.5
+    CLR P2.5
+    LCALL DELAY_10MS
+    
+    MOV P2, #30H
+    SETB P2.5
+    CLR P2.5
+    LCALL DELAY_1MS
+    
+    MOV P2, #30H
+    SETB P2.5
+    CLR P2.5
+    LCALL DELAY_1MS
+    
+    ; 4-bit mode
+    MOV P2, #20H
+    SETB P2.5
+    CLR P2.5
+    LCALL DELAY_1MS
+    
+    ; Configuration
+    MOV A, #28H
+    LCALL LCD_CMD
+    LCALL DELAY_5MS
+    
+    MOV A, #0CH
+    LCALL LCD_CMD
+    LCALL DELAY_5MS
+    
+    MOV A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_50MS
+    
+    MOV A, #06H
+    LCALL LCD_CMD
+    LCALL DELAY_5MS
+    
+    RET
+
+LCD_CMD:
+    CLR P2.4
+    LCALL SEND_BYTE
+    RET
+
+LCD_DATA:
+    SETB P2.4
+    LCALL SEND_BYTE
+    RET
+
+SEND_BYTE:
+    PUSH ACC
+    
+    ; High nibble
+    MOV C, ACC.4
+    MOV P2.0, C
+    MOV C, ACC.5
+    MOV P2.1, C
+    MOV C, ACC.6
+    MOV P2.2, C
+    MOV C, ACC.7
+    MOV P2.3, C
+    SETB P2.5
+    NOP
+    CLR P2.5
+    LCALL DELAY_1MS
+    
+    ; Low nibble
+    POP ACC
+    PUSH ACC
+    MOV C, ACC.0
+    MOV P2.0, C
+    MOV C, ACC.1
+    MOV P2.1, C
+    MOV C, ACC.2
+    MOV P2.2, C
+    MOV C, ACC.3
+    MOV P2.3, C
+    SETB P2.5
+    NOP
+    CLR P2.5
+    LCALL DELAY_2MS
+    
+    POP ACC
+    RET
+
+LCD_STRING:
+    CLR A
+    MOVC A, @A+DPTR
+    JZ STR_END
+    LCALL LCD_DATA
+    INC DPTR
+    SJMP LCD_STRING
+STR_END:
+    RET
+
+;==========================================
+; DELAYS
+;==========================================
+DELAY_200MS:
+    MOV R7, #200
+D200: MOV R6, #250
+    DJNZ R6, $
+    DJNZ R7, D200
+    RET
+
+DELAY_100MS:
+    MOV R7, #100
+D100: MOV R6, #250
+    DJNZ R6, $
+    DJNZ R7, D100
+    RET
+
+DELAY_50MS:
+    MOV R7, #50
+D50: MOV R6, #250
+    DJNZ R6, $
+    DJNZ R7, D50
+    RET
+
+DELAY_10MS:
+    MOV R7, #50
+D10: MOV R6, #50
+    DJNZ R6, $
+    DJNZ R7, D10
+    RET
+
+DELAY_5MS:
+    MOV R7, #25
+D5: MOV R6, #200
+    DJNZ R6, $
+    DJNZ R7, D5
+    RET
+
+DELAY_2MS:
+    MOV R7, #10
+D2: MOV R6, #200
+    DJNZ R6, $
+    DJNZ R7, D2
+    RET
+
+DELAY_1MS:
+    MOV R7, #5
+D1: MOV R6, #200
+    DJNZ R6, $
+    DJNZ R7, D1
+    RET
+
+DELAY_10US:
+    MOV R6, #8
+    DJNZ R6, $
+    RET
+
+;==========================================
+; MESSAGES
+;==========================================
+MSG_HEADER:
+    DB "Ultrasonic Meter", 0
+MSG_DIST:
+    DB "Dist: ", 0
+MSG_CM:
+    DB "cm", 0
+MSG_WARNING:
+    DB " <10cm!", 0
+MSG_BLANK:
+    DB "       ", 0
+
+END
